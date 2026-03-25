@@ -10,12 +10,26 @@ import (
 	"time"
 )
 
+// NormalizeArmoredPrivateKey fixes common PaaS issues: BOM, literal \n, CRLF.
+func NormalizeArmoredPrivateKey(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "\ufeff")
+	if !strings.Contains(s, "\n") && strings.Contains(s, `\n`) {
+		s = strings.ReplaceAll(s, `\n`, "\n")
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.TrimSpace(s)
+}
+
 // ImportArmoredPrivateKey imports an ASCII-armored secret key into the current GnuPG home (GNUPGHOME).
 // passphrase may be empty if the key is not encrypted.
 func ImportArmoredPrivateKey(ctx context.Context, armoredKey, passphrase string) error {
-	armoredKey = strings.TrimSpace(armoredKey)
+	armoredKey = NormalizeArmoredPrivateKey(armoredKey)
 	if armoredKey == "" {
 		return fmt.Errorf("armored private key is empty")
+	}
+	if !strings.Contains(armoredKey, "BEGIN PGP") {
+		return fmt.Errorf("key material is not valid ASCII-armored OpenPGP (missing BEGIN PGP block); use multiline secret, a file mount (GPG_PRIVATE_KEY_FILE), or GPG_PRIVATE_KEY_ARMORED_B64")
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)

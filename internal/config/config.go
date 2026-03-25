@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +31,8 @@ type Config struct {
 	GpgPrivateKey string
 	// GpgPrivateKeyFile is a path to private.asc (e.g. Docker secret mount /run/secrets/gpg_private.asc).
 	GpgPrivateKeyFile string
+	// GpgPrivateKeyArmoredB64 is base64(UTF-8 armored key) — use when the host mangles multiline secrets.
+	GpgPrivateKeyArmoredB64 string
 	GpgPublicKeyFingerprint string
 
 	GitAuthorName  string
@@ -57,6 +60,7 @@ func LoadFromEnv() (Config, error) {
 		GpgKeyID:                envString("GPG_KEYID", ""),
 		GpgPassphrase:           envString("GPG_PASSPHRASE", ""),
 		GpgPrivateKey:           envString("GPG_PRIVATE_KEY_ARMORED", ""),
+		GpgPrivateKeyArmoredB64: envString("GPG_PRIVATE_KEY_ARMORED_B64", ""),
 		GpgPrivateKeyFile:       envString("GPG_PRIVATE_KEY_FILE", ""),
 		GpgPublicKeyFingerprint: envString("GPG_PUBLIC_KEY_FINGERPRINT", ""),
 		GitAuthorName:           envString("GIT_AUTHOR_NAME", ""),
@@ -95,7 +99,7 @@ func LoadFromEnv() (Config, error) {
 	return cfg, nil
 }
 
-// LoadArmoredPrivateKey returns key material from GPG_PRIVATE_KEY_FILE if set, otherwise GPG_PRIVATE_KEY_ARMORED.
+// LoadArmoredPrivateKey resolves key material: file path > base64 env > raw armored env.
 func (c Config) LoadArmoredPrivateKey() (string, error) {
 	if strings.TrimSpace(c.GpgPrivateKeyFile) != "" {
 		b, err := os.ReadFile(c.GpgPrivateKeyFile)
@@ -103,6 +107,13 @@ func (c Config) LoadArmoredPrivateKey() (string, error) {
 			return "", fmt.Errorf("read GPG_PRIVATE_KEY_FILE: %w", err)
 		}
 		return string(b), nil
+	}
+	if strings.TrimSpace(c.GpgPrivateKeyArmoredB64) != "" {
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.GpgPrivateKeyArmoredB64))
+		if err != nil {
+			return "", fmt.Errorf("decode GPG_PRIVATE_KEY_ARMORED_B64: %w", err)
+		}
+		return string(raw), nil
 	}
 	return c.GpgPrivateKey, nil
 }

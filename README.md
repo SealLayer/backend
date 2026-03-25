@@ -69,8 +69,9 @@ Set variables in your environment (or Coolify “Environment” UI). **Never com
 
 | Variable | Description |
 |----------|-------------|
-| `GPG_PRIVATE_KEY_ARMORED` | *(Docker / CI)* Full ASCII-armored secret key. On startup the app runs `gpg --import` into `GNUPGHOME` before serving. |
-| `GPG_PRIVATE_KEY_FILE` | Path to a key file (e.g. `/run/secrets/gpg.asc`). If set, it overrides `GPG_PRIVATE_KEY_ARMORED` for import. |
+| `GPG_PRIVATE_KEY_ARMORED` | Full ASCII-armored secret key. On startup: `gpg --import` into `GNUPGHOME`. **Some hosts break multiline secrets** — use file or B64 if import fails. |
+| `GPG_PRIVATE_KEY_ARMORED_B64` | Base64-encoded UTF-8 armored key (**single line**). Prefer this when the UI mangles newlines. |
+| `GPG_PRIVATE_KEY_FILE` | Path to a key file (e.g. `/run/secrets/gpg.asc`). **Highest priority** if set. |
 | `GPG_PROGRAM` | *(Often Windows)* Full path to `gpg` so Git uses the same binary/keyring as signing (e.g. `C:\Program Files\GnuPG\bin\gpg.exe`). |
 | `GIT_SIGN_COMMITS` | `true` (default): GPG-sign Git commits. `false`: unsigned commits; detached receipt signature still produced. |
 
@@ -97,10 +98,11 @@ See [`docs/RESERVED.md`](docs/RESERVED.md) for `SEAL_PER_IP_PER_MINUTE`, `LEDGER
 
 You do **not** copy `private.asc` into the image. Pick one:
 
-1. **Secret file mount** — store the armored key as a Coolify/Docker secret file and set  
-   `GPG_PRIVATE_KEY_FILE=/run/secrets/your_key.asc` (path depends on your platform).
-2. **Multiline env** — paste the full `-----BEGIN PGP PRIVATE KEY BLOCK-----` block into  
-   `GPG_PRIVATE_KEY_ARMORED` (supported by many hosts as a “secret” variable).
+1. **Secret file mount** (most reliable) — mount `private.asc` and set `GPG_PRIVATE_KEY_FILE=/run/secrets/...`.
+2. **Base64 env** — encode the armored file as UTF-8, then base64 (one line), set `GPG_PRIVATE_KEY_ARMORED_B64`.  
+   PowerShell example:  
+   `[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content -Raw .\private.asc)))`
+3. **Multiline env** — `GPG_PRIVATE_KEY_ARMORED` with **Is Multiline** enabled; if you still see “no valid OpenPGP data”, the value was truncated — use (1) or (2).
 
 On startup the server imports the key into `GNUPGHOME` (`/app/.gnupg` in the Dockerfile) using `GPG_PASSPHRASE` if the key is encrypted. If the key is already in the image volume (advanced), you can omit both envs.
 
