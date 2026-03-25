@@ -26,7 +26,26 @@ go.work.sum
 
 # env file
 .env
+.env.*
+!.env.example
+
+# Local secrets (never commit)
+private.asc
+*.asc
+*.gpg
+id_rsa
+*.pem
+
+# Build output / local binaries (also covers server.exe)
+/bin/
+/dist/
+/build/
+server
+server.exe
+
+# Logs
+*.log
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/

@@ -1,0 +1,107 @@
+openapi: 3.0.3
+info:
+  title: SealLayer Backend API
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Healthcheck
+      responses:
+        "200":
+          description: OK
+  /v1/seal:
+    post:
+      summary: Seal a content hash (enqueue)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SealRequest"
+      responses:
+        "200":
+          description: Sealed (receipt returned)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SealResponse"
+        "202":
+          description: Accepted (processing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SealResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SealResponse"
+        "503":
+          description: Queue full
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SealResponse"
+  /v1/status/{batch_id}:
+    get:
+      summary: Get batch status
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+components:
+  schemas:
+    SealRequest:
+      type: object
+      required: [content_hash]
+      properties:
+        content_hash:
+          type: string
+          description: 64-char lowercase hex SHA-256 of file bytes.
+          example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    SealResponse:
+      type: object
+      properties:
+        receipt:
+          description: .sealed-like receipt JSON
+          nullable: true
+        batch_id:
+          type: string
+        status_url:
+          type: string
+        error:
+          type: string
+    StatusResponse:
+      type: object
+      required: [batch_id, status]
+      properties:
+        batch_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, batching, pushed, failed, not_found, invalid]
+        ledger_path:
+          type: string
+        commit_sha:
+          type: string
+        error:
+          type: string
+
