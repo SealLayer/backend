@@ -42,6 +42,10 @@ type Config struct {
 	GpgProgram string
 	// GitSignCommits: if false, Git commits are not OpenPGP-signed; detached receipt signature is still produced.
 	GitSignCommits bool
+
+	// CORSAllowedOrigins: comma-separated list (e.g. https://app.example.com,http://localhost:5173).
+	// Empty = CORS disabled. Use "*" to allow any origin (dev only; do not use with credentials).
+	CORSAllowedOrigins string
 }
 
 func LoadFromEnv() (Config, error) {
@@ -67,6 +71,7 @@ func LoadFromEnv() (Config, error) {
 		GitAuthorEmail:          envString("GIT_AUTHOR_EMAIL", ""),
 		GpgProgram:              envString("GPG_PROGRAM", ""),
 		GitSignCommits:          envBool("GIT_SIGN_COMMITS", true),
+		CORSAllowedOrigins:      envString("CORS_ALLOWED_ORIGINS", ""),
 	}
 
 	if cfg.LedgerRepoBaseRawURL == "" && cfg.GitHubOwner != "" && cfg.GitHubRepo != "" {

@@ -16,6 +16,7 @@ import (
 	"github.com/SealLayer/backend/internal/logger"
 	"github.com/SealLayer/backend/internal/queue"
 	"github.com/SealLayer/backend/internal/worker"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -40,6 +41,7 @@ func NewServer(cfg config.Config, log *slog.Logger) *Server {
 
 	engine := gin.New()
 	engine.Use(gin.Recovery())
+	engine.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	engine.Use(requestLogMiddleware(log))
 
 	s := &Server{
@@ -76,6 +78,39 @@ func requestLogMiddleware(log *slog.Logger) gin.HandlerFunc {
 			"client_ip", c.ClientIP(),
 		)
 	}
+}
+
+// corsMiddleware enables browser cross-origin requests when CORS_ALLOWED_ORIGINS is set.
+// Empty = no CORS headers (server-to-server, curl, same-origin reverse proxy unaffected).
+func corsMiddleware(allowedOriginsEnv string) gin.HandlerFunc {
+	s := strings.TrimSpace(allowedOriginsEnv)
+	if s == "" {
+		return func(c *gin.Context) { c.Next() }
+	}
+
+	cfg := cors.Config{
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"X-Request-ID"},
+		AllowCredentials: false,
+		MaxAge:           12 * 3600,
+	}
+	if s == "*" {
+		cfg.AllowAllOrigins = true
+	} else {
+		var origins []string
+		for _, p := range strings.Split(s, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				origins = append(origins, p)
+			}
+		}
+		if len(origins) == 0 {
+			return func(c *gin.Context) { c.Next() }
+		}
+		cfg.AllowOrigins = origins
+	}
+	return cors.New(cfg)
 }
 
 func newRequestID() string {

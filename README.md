@@ -89,6 +89,9 @@ The Docker image sets `GNUPGHOME=/app/.gnupg` so the imported key lives in a pre
 | `QUEUE_CAPACITY` | `1000` | Max queued jobs. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `GIN_MODE` | release | Set to `debug` only for Gin route debug noise. |
+| `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated browser origins allowed to call the API (e.g. `https://app.example.com,http://localhost:5173`). Empty = no CORS. `*` = any origin (dev only). |
+
+**CORS** applies only when a **browser** loads a page on domain A and uses `fetch` to domain B (`api.seallayer.com`). Server-side clients (curl, PHP, mobile apps, backend jobs) do not use CORS. Same-origin setups (e.g. Next.js API routes proxying to the Go service) also avoid CORS.
 
 ### Reserved / future env
 
