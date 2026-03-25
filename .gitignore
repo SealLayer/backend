@@ -36,11 +36,11 @@ private.asc
 id_rsa
 *.pem
 
-# Build output / local binaries (also covers server.exe)
+# Build output / local binaries (root-only; do not use "server" alone — it ignores cmd/server/)
 /bin/
 /dist/
 /build/
-server
+/server
 server.exe
 
 # Logs
