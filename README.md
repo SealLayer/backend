@@ -16,6 +16,7 @@
 |---|---|
 | **No database** | In-memory queue + batch status (lost on restart). |
 | **Git as ledger** | Clone → commit (signed optional) → push to your GitHub repo. |
+| **Continuous hash chain** | Chain continues across day files (`ledger/YYYY/MM/DD.jsonl`) by backfilling the previous available day’s `final_hash`. |
 | **GPG** | Detached signature on batch root; optional GPG-signed Git commits. |
 | **Observability** | Structured logs to **stdout** only (no log files). |
 
@@ -45,6 +46,19 @@ Default listen address: `:8080` (`HTTP_LISTEN_ADDR`).
 ```bash
 curl -s http://localhost:8080/healthz
 ```
+
+---
+
+## Ledger chain continuity
+
+- Ledger files are split by UTC day (`ledger/YYYY/MM/DD.jsonl`) for operational readability.
+- The cryptographic chain is **global and continuous** across days:
+  1. Use the last `final_hash` in today’s file, if present.
+  2. If today’s file is empty/missing, scan previous day files and use the nearest available `final_hash`.
+  3. If no ledger exists yet (first-ever write), use a deterministic genesis anchor.
+- This prevents day rollover failures while keeping one uninterrupted verification chain.
+
+For a full architecture and data-flow explanation, see [`docs/SISTEM_AKISI.md`](docs/SISTEM_AKISI.md).
 
 ---
 
