@@ -94,7 +94,7 @@ func corsMiddleware(allowedOriginsEnv string) gin.HandlerFunc {
 
 	cfg := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "Idempotency-Key"},
 		ExposeHeaders:    []string{"X-Request-ID"},
 		AllowCredentials: false,
 		MaxAge:           12 * 3600,
