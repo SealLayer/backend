@@ -30,6 +30,16 @@ type Worker struct {
 const (
 	chainLookbackDays = 3660
 	chainGenesisSeed  = "SIP-v1-global-genesis"
+	reasonQueued      = "queued"
+	reasonBatching    = "batching"
+	reasonPushed      = "pushed"
+	reasonInvalid     = "invalid_batch"
+	reasonGitHubFetch = "github_fetch_failed"
+	reasonLedgerParse = "ledger_parse_failed"
+	reasonAppend      = "ledger_append_failed"
+	reasonGpgSign     = "gpg_sign_failed"
+	reasonGitPush     = "git_push_failed"
+	reasonInternal    = "internal_error"
 )
 
 func New(cfg config.Config, log *slog.Logger, q *queue.Queue, store *queue.BatchStore) *Worker {
@@ -92,7 +102,7 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 				logger.BatchID, batchID,
 				"got", j.BatchID,
 			)
-			w.fail(batchID, "", fmt.Errorf("internal batch_id mismatch"), jobs)
+			w.failWithReason(batchID, "", reasonInvalid, false, fmt.Errorf("internal batch_id mismatch"), jobs)
 			return
 		}
 	}
@@ -106,9 +116,11 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 	)
 
 	w.store.Put(queue.BatchState{
-		BatchID:   batchID,
-		Status:    queue.StatusBatching,
-		UpdatedAt: time.Now().UTC(),
+		BatchID:    batchID,
+		Status:     queue.StatusBatching,
+		ReasonCode: reasonBatching,
+		Retryable:  true,
+		UpdatedAt:  time.Now().UTC(),
 	})
 
 	ledgerPath := ledgerPathForTime(now)
@@ -132,13 +144,13 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 		)
 		lastContent, _, _, err = w.gh.GetFile(ctx, w.cfg.GitHubOwner, w.cfg.GitHubRepo, ledgerPath, w.cfg.GitHubBranch)
 		if err != nil {
-			w.fail(batchID, ledgerPath, fmt.Errorf("failed to fetch file: %w", err), jobs)
+			w.failWithReason(batchID, ledgerPath, reasonGitHubFetch, true, fmt.Errorf("failed to fetch file: %w", err), jobs)
 			return
 		}
 
 		prevHash, err := w.resolvePrevHash(ctx, now, lastContent)
 		if err != nil {
-			w.fail(batchID, ledgerPath, fmt.Errorf("failed to parse last final hash: %w", err), jobs)
+			w.failWithReason(batchID, ledgerPath, reasonLedgerParse, false, fmt.Errorf("failed to parse last final hash: %w", err), jobs)
 			return
 		}
 
@@ -174,7 +186,7 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 
 		updated, err := ledger.AppendRows(lastContent, rows)
 		if err != nil {
-			w.fail(batchID, ledgerPath, fmt.Errorf("append failed: %w", err), jobs)
+			w.failWithReason(batchID, ledgerPath, reasonAppend, false, fmt.Errorf("append failed: %w", err), jobs)
 			return
 		}
 
@@ -186,7 +198,7 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 		)
 		sigB64, sigErr := crypto.SignDetachedArmorBase64(ctx, w.cfg.GpgKeyID, w.cfg.GpgPassphrase, []byte(batchRoot))
 		if sigErr != nil {
-			w.fail(batchID, ledgerPath, fmt.Errorf("detached signature failed: %w", sigErr), jobs)
+			w.failWithReason(batchID, ledgerPath, reasonGpgSign, false, fmt.Errorf("detached signature failed: %w", sigErr), jobs)
 			return
 		}
 		w.log.Info("crypto: detached signature produced",
@@ -223,6 +235,8 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 				Status:     queue.StatusPushed,
 				LedgerPath: ledgerPath,
 				CommitSHA:  commitSHA,
+				ReasonCode: reasonPushed,
+				Retryable:  false,
 				UpdatedAt:  time.Now().UTC(),
 			})
 			for _, j := range jobs {
@@ -275,7 +289,7 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 	}
 
-	w.fail(batchID, ledgerPath, fmt.Errorf("push max retries exceeded"), jobs)
+	w.failWithReason(batchID, ledgerPath, reasonGitPush, true, fmt.Errorf("push max retries exceeded"), jobs)
 }
 
 // groupJobsByBatchID groups by batch_id while preserving drain order (multiple batches per tick possible).
@@ -356,11 +370,13 @@ func prefixHex(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func (w *Worker) fail(batchID, ledgerPath string, err error, jobs []*queue.SealJob) {
+func (w *Worker) failWithReason(batchID, ledgerPath, reasonCode string, retryable bool, err error, jobs []*queue.SealJob) {
 	w.log.Error("batch: failed",
 		logger.Op, "batch_fail",
 		logger.BatchID, batchID,
 		"ledger_path", ledgerPath,
+		"reason_code", reasonCode,
+		"retryable", retryable,
 		"err", err,
 		"affected_jobs", len(jobs),
 	)
@@ -369,6 +385,8 @@ func (w *Worker) fail(batchID, ledgerPath string, err error, jobs []*queue.SealJ
 		Status:     queue.StatusFailed,
 		LedgerPath: ledgerPath,
 		Error:      err.Error(),
+		ReasonCode: reasonCode,
+		Retryable:  retryable,
 		UpdatedAt:  time.Now().UTC(),
 	})
 	for _, j := range jobs {

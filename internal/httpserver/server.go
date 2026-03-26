@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,6 +29,7 @@ type Server struct {
 
 	q     *queue.Queue
 	store *queue.BatchStore
+	idem  *queue.IdempotencyStore
 
 	worker *worker.Worker
 }
@@ -50,6 +53,7 @@ func NewServer(cfg config.Config, log *slog.Logger) *Server {
 		engine: engine,
 		q:      queue.New(cfg.QueueCapacity),
 		store:  queue.NewBatchStore(),
+		idem:   queue.NewIdempotencyStore(cfg.IdempotencyTTL),
 	}
 
 	s.worker = worker.New(cfg, log, s.q, s.store)
@@ -121,6 +125,20 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
+const (
+	statusReasonQueued              = "queued"
+	statusReasonBatching            = "batching"
+	statusReasonPushed              = "pushed"
+	statusReasonProcessing          = "processing"
+	statusReasonQueueFull           = "queue_full"
+	statusReasonInvalidJSON         = "invalid_json"
+	statusReasonInvalidHash         = "invalid_hash"
+	statusReasonMissingBatchID      = "batch_id_required"
+	statusReasonNotFound            = "batch_not_found"
+	statusReasonFailed              = "failed"
+	statusReasonIdempotencyConflict = "idempotency_conflict"
+)
+
 func (s *Server) registerRoutes() {
 	s.engine.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -130,6 +148,8 @@ func (s *Server) registerRoutes() {
 	{
 		v1.POST("/seal", s.handleSeal())
 		v1.GET("/status/:batch_id", s.handleStatus())
+		v1.GET("/status/stream/:batch_id", s.handleStatusStream())
+		v1.GET("/config/public", s.handlePublicConfig())
 	}
 }
 
@@ -174,7 +194,7 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 				logger.RequestID, reqID,
 				"err", err,
 			)
-			c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "invalid json"})
+			c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "invalid json", ReasonCode: statusReasonInvalidJSON})
 			return
 		}
 
@@ -185,7 +205,7 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 				logger.RequestID, reqID,
 				"len", len(contentHash),
 			)
-			c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "content_hash must be 64 hex characters"})
+			c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "content_hash must be 64 hex characters", ReasonCode: statusReasonInvalidHash})
 			return
 		}
 		for _, r := range contentHash {
@@ -194,7 +214,29 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 					logger.Op, "seal_validate",
 					logger.RequestID, reqID,
 				)
-				c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "content_hash must be [0-9a-f] only"})
+				c.JSON(http.StatusBadRequest, apiv1.SealResponse{Error: "content_hash must be [0-9a-f] only", ReasonCode: statusReasonInvalidHash})
+				return
+			}
+		}
+
+		idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+		if idempotencyKey != "" {
+			if ent, ok := s.idem.Get(idempotencyKey, time.Now().UTC()); ok {
+				if ent.ContentHash != contentHash {
+					c.JSON(http.StatusConflict, apiv1.SealResponse{
+						BatchID:    ent.BatchID,
+						StatusURL:  "/v1/status/" + ent.BatchID,
+						Error:      "idempotency key reuse with different content_hash",
+						ReasonCode: statusReasonIdempotencyConflict,
+					})
+					return
+				}
+				c.JSON(http.StatusAccepted, apiv1.SealResponse{
+					BatchID:    ent.BatchID,
+					StatusURL:  "/v1/status/" + ent.BatchID,
+					Error:      "duplicate accepted",
+					ReasonCode: statusReasonProcessing,
+				})
 				return
 			}
 		}
@@ -204,9 +246,11 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 		batchID := queue.BatchIDForTime(now, s.cfg.BatchInterval)
 
 		s.store.Put(queue.BatchState{
-			BatchID:   batchID,
-			Status:    queue.StatusQueued,
-			UpdatedAt: time.Now().UTC(),
+			BatchID:    batchID,
+			Status:     queue.StatusQueued,
+			ReasonCode: statusReasonQueued,
+			Retryable:  true,
+			UpdatedAt:  time.Now().UTC(),
 		})
 		job := &queue.SealJob{
 			BatchID:     batchID,
@@ -222,8 +266,11 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 				logger.RequestID, reqID,
 				logger.BatchID, batchID,
 			)
-			c.JSON(http.StatusServiceUnavailable, apiv1.SealResponse{Error: "queue full"})
+			c.JSON(http.StatusServiceUnavailable, apiv1.SealResponse{Error: "queue full", ReasonCode: statusReasonQueueFull})
 			return
+		}
+		if idempotencyKey != "" {
+			s.idem.Put(idempotencyKey, contentHash, batchID, time.Now().UTC())
 		}
 
 		hashPrefix := contentHash
@@ -250,9 +297,10 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 				"wait_max", s.cfg.RequestPendingMax.String(),
 			)
 			c.JSON(http.StatusAccepted, apiv1.SealResponse{
-				BatchID:   batchID,
-				StatusURL: "/v1/status/" + batchID,
-				Error:     "processing",
+				BatchID:    batchID,
+				StatusURL:  "/v1/status/" + batchID,
+				Error:      "processing",
+				ReasonCode: statusReasonProcessing,
 			})
 			return
 		case res := <-resCh:
@@ -264,9 +312,10 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 					"err", res.Err,
 				)
 				c.JSON(http.StatusInternalServerError, apiv1.SealResponse{
-					BatchID:   batchID,
-					StatusURL: "/v1/status/" + batchID,
-					Error:     "failed",
+					BatchID:    batchID,
+					StatusURL:  "/v1/status/" + batchID,
+					Error:      "failed",
+					ReasonCode: statusReasonFailed,
 				})
 				return
 			}
@@ -278,9 +327,10 @@ func (s *Server) handleSeal() gin.HandlerFunc {
 				"commit_sha", res.CommitSHA,
 			)
 			c.JSON(http.StatusOK, apiv1.SealResponse{
-				Receipt:   res.Receipt,
-				BatchID:   batchID,
-				StatusURL: "/v1/status/" + batchID,
+				Receipt:    res.Receipt,
+				BatchID:    batchID,
+				StatusURL:  "/v1/status/" + batchID,
+				ReasonCode: statusReasonPushed,
 			})
 			return
 		}
@@ -298,7 +348,13 @@ func (s *Server) handleStatus() gin.HandlerFunc {
 				logger.Op, "status_query",
 				logger.RequestID, reqID,
 			)
-			c.JSON(http.StatusBadRequest, apiv1.StatusResponse{BatchID: "", Status: "invalid", Error: "batch_id required"})
+			c.JSON(http.StatusBadRequest, apiv1.StatusResponse{
+				BatchID:    "",
+				Status:     "invalid",
+				Error:      "batch_id required",
+				ReasonCode: statusReasonMissingBatchID,
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			})
 			return
 		}
 		st, ok := s.store.Get(batchID)
@@ -308,7 +364,12 @@ func (s *Server) handleStatus() gin.HandlerFunc {
 				logger.RequestID, reqID,
 				logger.BatchID, batchID,
 			)
-			c.JSON(http.StatusNotFound, apiv1.StatusResponse{BatchID: batchID, Status: "not_found"})
+			c.JSON(http.StatusNotFound, apiv1.StatusResponse{
+				BatchID:    batchID,
+				Status:     "not_found",
+				ReasonCode: statusReasonNotFound,
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			})
 			return
 		}
 		s.logger.Info("status: response sent",
@@ -319,12 +380,108 @@ func (s *Server) handleStatus() gin.HandlerFunc {
 			"ledger_path", st.LedgerPath,
 			"commit_sha", st.CommitSHA,
 		)
-		c.JSON(http.StatusOK, apiv1.StatusResponse{
-			BatchID:    st.BatchID,
-			Status:     string(st.Status),
-			LedgerPath: st.LedgerPath,
-			CommitSHA:  st.CommitSHA,
-			Error:      st.Error,
+		c.JSON(http.StatusOK, statusResponseFromState(st))
+	}
+}
+
+func (s *Server) handlePublicConfig() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, apiv1.PublicConfigResponse{
+			ProtocolVersion:      "SIP-v1",
+			PublicKeyFingerprint: s.cfg.GpgPublicKeyFingerprint,
+			StatusPollIntervalMs: int64((s.cfg.BatchInterval / 2) / time.Millisecond),
+			BatchIntervalMs:      int64(s.cfg.BatchInterval / time.Millisecond),
+			ServerTimeUTC:        time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+}
+
+func (s *Server) handleStatusStream() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		batchID := strings.TrimSpace(c.Param("batch_id"))
+		if batchID == "" {
+			c.JSON(http.StatusBadRequest, apiv1.StatusResponse{
+				BatchID:    "",
+				Status:     "invalid",
+				Error:      "batch_id required",
+				ReasonCode: statusReasonMissingBatchID,
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
+
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.WriteHeader(http.StatusOK)
+
+		if st, ok := s.store.Get(batchID); ok {
+			if err := writeStatusEvent(c, statusResponseFromState(st)); err != nil {
+				return
+			}
+			if st.Status == queue.StatusPushed || st.Status == queue.StatusFailed {
+				return
+			}
+		} else {
+			_ = writeStatusEvent(c, apiv1.StatusResponse{
+				BatchID:    batchID,
+				Status:     "not_found",
+				ReasonCode: statusReasonNotFound,
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+
+		updates, cancel := s.store.Subscribe(batchID)
+		defer cancel()
+		ticker := time.NewTicker(25 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case st := <-updates:
+				resp := statusResponseFromState(st)
+				if err := writeStatusEvent(c, resp); err != nil {
+					return
+				}
+				if st.Status == queue.StatusPushed || st.Status == queue.StatusFailed {
+					return
+				}
+			case <-ticker.C:
+				if _, err := c.Writer.Write([]byte(": keepalive\n\n")); err != nil {
+					return
+				}
+				if f, ok := c.Writer.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		}
+	}
+}
+
+func statusResponseFromState(st queue.BatchState) apiv1.StatusResponse {
+	return apiv1.StatusResponse{
+		BatchID:    st.BatchID,
+		Status:     string(st.Status),
+		LedgerPath: st.LedgerPath,
+		CommitSHA:  st.CommitSHA,
+		Error:      st.Error,
+		ReasonCode: st.ReasonCode,
+		Retryable:  st.Retryable,
+		UpdatedAt:  st.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func writeStatusEvent(c *gin.Context, payload apiv1.StatusResponse) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := c.Writer.Write([]byte(fmt.Sprintf("event: status\ndata: %s\n\n", raw))); err != nil {
+		return err
+	}
+	if f, ok := c.Writer.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
 }

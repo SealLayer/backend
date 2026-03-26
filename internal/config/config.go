@@ -22,11 +22,12 @@ type Config struct {
 	QueueCapacity        int
 	BatchInterval        time.Duration
 	RequestPendingMax    time.Duration
+	IdempotencyTTL       time.Duration
 	SealPerIpPerMinute   int
 	LedgerRepoBaseRawURL string
 
-	GpgKeyID                string
-	GpgPassphrase           string
+	GpgKeyID      string
+	GpgPassphrase string
 	// GpgPrivateKey is raw armored secret key text (e.g. from CI secret). Prefer file in production.
 	GpgPrivateKey string
 	// GpgPrivateKeyFile is a path to private.asc (e.g. Docker secret mount /run/secrets/gpg_private.asc).
@@ -59,6 +60,7 @@ func LoadFromEnv() (Config, error) {
 		QueueCapacity:           envInt("QUEUE_CAPACITY", 1000),
 		BatchInterval:           envDuration("BATCH_INTERVAL", 10*time.Second),
 		RequestPendingMax:       envDuration("REQUEST_PENDING_MAX", 30*time.Second),
+		IdempotencyTTL:          envDuration("IDEMPOTENCY_TTL", 10*time.Minute),
 		SealPerIpPerMinute:      envInt("SEAL_PER_IP_PER_MINUTE", 2),
 		LedgerRepoBaseRawURL:    envString("LEDGER_RAW_BASE_URL", ""),
 		GpgKeyID:                envString("GPG_KEYID", ""),

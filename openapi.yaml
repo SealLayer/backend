@@ -14,6 +14,13 @@ paths:
   /v1/seal:
     post:
       summary: Seal a content hash (enqueue)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Optional key to deduplicate retried requests for a limited time window.
       requestBody:
         required: true
         content:
@@ -45,6 +52,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SealResponse"
+        "409":
+          description: Idempotency key conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SealResponse"
   /v1/status/{batch_id}:
     get:
       summary: Get batch status
@@ -67,6 +80,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusResponse"
+  /v1/status/stream/{batch_id}:
+    get:
+      summary: Stream batch status updates (SSE)
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/config/public:
+    get:
+      summary: Public runtime configuration for frontend clients
+      responses:
+        "200":
+          description: Public config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicConfigResponse"
 components:
   schemas:
     SealRequest:
@@ -89,6 +128,8 @@ components:
           type: string
         error:
           type: string
+        reason_code:
+          type: string
     StatusResponse:
       type: object
       required: [batch_id, status]
@@ -103,5 +144,28 @@ components:
         commit_sha:
           type: string
         error:
+          type: string
+        reason_code:
+          type: string
+        retryable:
+          type: boolean
+        updated_at:
+          type: string
+          description: RFC3339 timestamp of last state update.
+    PublicConfigResponse:
+      type: object
+      required: [protocol_version, public_key_fingerprint, status_poll_interval_ms, batch_interval_ms, server_time_utc]
+      properties:
+        protocol_version:
+          type: string
+        public_key_fingerprint:
+          type: string
+        status_poll_interval_ms:
+          type: integer
+          format: int64
+        batch_interval_ms:
+          type: integer
+          format: int64
+        server_time_utc:
           type: string
 

@@ -100,12 +100,18 @@ The Docker image sets `GNUPGHOME=/app/.gnupg` so the imported key lives in a pre
 | `GITHUB_REPO_URL` | auto | Override clone URL if needed. |
 | `BATCH_INTERVAL` | `10s` | Worker tick / batching window. |
 | `REQUEST_PENDING_MAX` | `30s` | How long `POST /v1/seal` waits for inline completion before `202`. |
+| `IDEMPOTENCY_TTL` | `10m` | Time window to deduplicate repeated `POST /v1/seal` requests with the same `Idempotency-Key`. |
 | `QUEUE_CAPACITY` | `1000` | Max queued jobs. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `GIN_MODE` | release | Set to `debug` only for Gin route debug noise. |
-| `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated browser origins allowed to call the API (e.g. `https://app.example.com,http://localhost:5173`). Empty = no CORS. `*` = any origin (dev only). |
+| `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated browser origins allowed to call the API (e.g. `https://app.example.com,http://localhost:5173`). Empty = no CORS. `*` = any origin (**dev/test only**). |
 
 **CORS** applies only when a **browser** loads a page on domain A and uses `fetch` to domain B (`api.seallayer.com`). Server-side clients (curl, PHP, mobile apps, backend jobs) do not use CORS. Same-origin setups (e.g. Next.js API routes proxying to the Go service) also avoid CORS.
+
+Production guidance:
+- Set explicit origins in `CORS_ALLOWED_ORIGINS` (do not use `*`).
+- Preflight (`OPTIONS`) is handled by middleware.
+- API exposes `X-Request-ID` header to browser clients.
 
 ### Reserved / future env
 
@@ -132,8 +138,10 @@ OpenAPI: [`openapi.yaml`](openapi.yaml).
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/healthz` | Liveness. |
-| `POST` | `/v1/seal` | Body: `{ "content_hash": "<64 hex lowercase sha256>" }`. |
-| `GET` | `/v1/status/{batch_id}` | Batch state from **server memory** (`queued`, `batching`, `pushed`, `failed`, …). |
+| `POST` | `/v1/seal` | Body: `{ "content_hash": "<64 hex lowercase sha256>" }`; optional header `Idempotency-Key`. |
+| `GET` | `/v1/status/{batch_id}` | Batch state from **server memory** (`queued`, `batching`, `pushed`, `failed`, …) with `reason_code`, `retryable`, `updated_at`. |
+| `GET` | `/v1/status/stream/{batch_id}` | SSE status stream (`event: status`) for live updates. |
+| `GET` | `/v1/config/public` | Frontend-safe runtime config (`protocol_version`, fingerprint, polling hints). |
 
 ### Example: seal
 
@@ -146,6 +154,7 @@ curl -s -X POST http://localhost:8080/v1/seal \
 - **`200`**: Receipt JSON in `receipt`.
 - **`202`**: Processing; poll `status_url` / `GET /v1/status/{batch_id}`.
 - **`503`**: Queue full.
+- **`409`**: `Idempotency-Key` reused with a different `content_hash`.
 
 Verification of signatures is **client-side**; the API does not need a separate verify endpoint for that model.
 

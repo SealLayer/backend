@@ -86,22 +86,36 @@ type BatchState struct {
 	LedgerPath string
 	CommitSHA  string
 	Error      string
+	ReasonCode string
+	Retryable  bool
 	UpdatedAt  time.Time
 }
 
 type BatchStore struct {
-	mu sync.RWMutex
-	m  map[string]BatchState
+	mu   sync.RWMutex
+	m    map[string]BatchState
+	subs map[string]map[chan BatchState]struct{}
 }
 
 func NewBatchStore() *BatchStore {
-	return &BatchStore{m: make(map[string]BatchState)}
+	return &BatchStore{
+		m:    make(map[string]BatchState),
+		subs: make(map[string]map[chan BatchState]struct{}),
+	}
 }
 
 func (s *BatchStore) Put(st BatchState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.m[st.BatchID] = st
+	if listeners, ok := s.subs[st.BatchID]; ok {
+		for ch := range listeners {
+			select {
+			case ch <- st:
+			default:
+			}
+		}
+	}
 }
 
 func (s *BatchStore) Get(batchID string) (BatchState, bool) {
@@ -109,4 +123,29 @@ func (s *BatchStore) Get(batchID string) (BatchState, bool) {
 	defer s.mu.RUnlock()
 	st, ok := s.m[batchID]
 	return st, ok
+}
+
+// Subscribe creates a state change stream for a batch_id.
+// The caller must call returned cancel function to avoid leaks.
+func (s *BatchStore) Subscribe(batchID string) (<-chan BatchState, func()) {
+	ch := make(chan BatchState, 8)
+	s.mu.Lock()
+	if _, ok := s.subs[batchID]; !ok {
+		s.subs[batchID] = make(map[chan BatchState]struct{})
+	}
+	s.subs[batchID][ch] = struct{}{}
+	s.mu.Unlock()
+
+	cancel := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if listeners, ok := s.subs[batchID]; ok {
+			delete(listeners, ch)
+			if len(listeners) == 0 {
+				delete(s.subs, batchID)
+			}
+		}
+		close(ch)
+	}
+	return ch, cancel
 }
