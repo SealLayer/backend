@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -25,6 +26,11 @@ type Worker struct {
 	gh     *githubclient.Client
 	closed chan struct{}
 }
+
+const (
+	chainLookbackDays = 3660
+	chainGenesisSeed  = "SIP-v1-global-genesis"
+)
 
 func New(cfg config.Config, log *slog.Logger, q *queue.Queue, store *queue.BatchStore) *Worker {
 	return &Worker{
@@ -130,7 +136,7 @@ func (w *Worker) processBatchGroup(ctx context.Context, jobs []*queue.SealJob) {
 			return
 		}
 
-		prevHash, err := ledger.ParseLastFinalHash(lastContent)
+		prevHash, err := w.resolvePrevHash(ctx, now, lastContent)
 		if err != nil {
 			w.fail(batchID, ledgerPath, fmt.Errorf("failed to parse last final hash: %w", err), jobs)
 			return
@@ -290,6 +296,56 @@ func groupJobsByBatchID(jobs []*queue.SealJob) [][]*queue.SealJob {
 
 func ledgerPathForTime(t time.Time) string {
 	return fmt.Sprintf("ledger/%04d/%02d/%02d.jsonl", t.Year(), int(t.Month()), t.Day())
+}
+
+// resolvePrevHash returns the chain anchor for the next row to be written today.
+// Order:
+// 1) last final_hash inside today's ledger file (if present),
+// 2) nearest previous day containing a final_hash (global chain continuity),
+// 3) deterministic genesis for the very first ledger write.
+func (w *Worker) resolvePrevHash(ctx context.Context, today time.Time, todayContent string) (string, error) {
+	prevHash, err := ledger.ParseLastFinalHash(todayContent)
+	if err == nil {
+		return prevHash, nil
+	}
+	if !errors.Is(err, ledger.ErrNoFinalHash) {
+		return "", err
+	}
+
+	for day := 1; day <= chainLookbackDays; day++ {
+		candidateDay := today.AddDate(0, 0, -day)
+		candidatePath := ledgerPathForTime(candidateDay)
+		content, _, exists, getErr := w.gh.GetFile(ctx, w.cfg.GitHubOwner, w.cfg.GitHubRepo, candidatePath, w.cfg.GitHubBranch)
+		if getErr != nil {
+			return "", fmt.Errorf("fetch previous ledger %s: %w", candidatePath, getErr)
+		}
+		if !exists {
+			continue
+		}
+		prevHash, parseErr := ledger.ParseLastFinalHash(content)
+		if parseErr == nil {
+			w.log.Info("ledger: previous day final hash loaded",
+				logger.Op, "ledger_prev_hash_backfill",
+				"source_ledger_path", candidatePath,
+				"days_back", day,
+				"prev_hash_prefix", prefixHex(prevHash, 16),
+			)
+			return prevHash, nil
+		}
+		if errors.Is(parseErr, ledger.ErrNoFinalHash) {
+			continue
+		}
+		return "", fmt.Errorf("parse previous ledger %s: %w", candidatePath, parseErr)
+	}
+
+	genesis := crypto.Sha256HexLower(chainGenesisSeed)
+	w.log.Warn("ledger: no prior final hash found, using deterministic genesis anchor",
+		logger.Op, "ledger_prev_hash_genesis",
+		"lookback_days", chainLookbackDays,
+		"genesis_seed", chainGenesisSeed,
+		"prev_hash_prefix", prefixHex(genesis, 16),
+	)
+	return genesis, nil
 }
 
 // prefixHex returns a short hex prefix for logs (full hash is not logged).
